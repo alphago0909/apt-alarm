@@ -48,8 +48,8 @@ def save_deal(unique_id):
         f.write(unique_id + "\n")
 
 def check_new_deals():
-    # 2025년 1월 데이터 고정
-    deal_ymd = "202501"
+    # 현재 날짜 기준 (YYYYMM)
+    deal_ymd = time.strftime("%Y%m") 
     
     urls = {
         "매매": "https://apis.data.go.kr/1613000/RTMSDataSvcAptTrade/getRTMSDataSvcAptTrade",
@@ -75,10 +75,28 @@ def check_new_deals():
                 for item in items:
                     apt = safe_get_text(item, "aptNm", "아파트")
                     floor = safe_get_text(item, "floor", "0")
+                    
+                    # 날짜 처리
                     day = safe_get_text(item, "dealDay", "0")
                     rent_day = safe_get_text(item, "dealDay", day)
                     real_day = rent_day if type_name == "전월세" else day
 
+                    # ★★★ 면적 추가 (전용면적) ★★★
+                    # 전월세/분양권 등 API마다 태그가 다를 수 있어 두 가지 다 시도
+                    area = safe_get_text(item, "excluUseAr", "") 
+                    if not area:
+                         # 혹시 다른 태그일 경우 대비
+                         area = safe_get_text(item, "contractArea", "0")
+
+                    # 평수 계산 (소수점 1자리까지)
+                    try:
+                        area_float = float(area)
+                        pyung = round(area_float / 3.3058, 1) # 3.3으로 나누기
+                        area_str = f"{area_float}㎡ ({pyung}평)"
+                    except:
+                        area_str = f"{area}㎡"
+
+                    # 가격 정보
                     if type_name == "전월세":
                         deposit = safe_get_text(item, "deposit", "0")
                         monthly = safe_get_text(item, "monthlyRent", "0")
@@ -87,11 +105,20 @@ def check_new_deals():
                         price = safe_get_text(item, "dealAmount", "0")
                         price_str = f"{type_name} {price}"
 
-                    unique_id = f"{gu_name}|{type_name}|{apt}|{floor}층|{price_str}|{real_day}일"
+                    # 고유 ID에 면적도 포함 (같은 층, 같은 가격이라도 평수가 다르면 다른 거래니까요)
+                    unique_id = f"{gu_name}|{type_name}|{apt}|{area}|{floor}층|{price_str}|{real_day}일"
                     
                     if unique_id not in saved_deals:
                         icon = "🏠" if type_name == "매매" else ("🔑" if type_name == "전월세" else "🎫")
-                        msg = f"🔔 [서울 {gu_name} - 신규 {type_name}]\n{icon} {apt} ({floor}층)\n💰 {price_str}만원\n📅 계약: {real_day}일"
+                        
+                        # ★★★ 알람 메시지에 면적 추가 ★★★
+                        msg = (
+                            f"🔔 [서울 {gu_name} - 신규 {type_name}]\n"
+                            f"{icon} {apt} ({floor}층)\n"
+                            f"📏 {area_str}\n"  # 여기에 면적 표시
+                            f"💰 {price_str}만원\n"
+                            f"📅 계약: {real_day}일"
+                        )
                         
                         send_telegram_msg(msg)
                         save_deal(unique_id)
