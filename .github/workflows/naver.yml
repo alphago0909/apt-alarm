@@ -6,7 +6,7 @@ on:
   workflow_dispatch:      # 수동 실행
 
 permissions:
-  contents: write
+  contents: write  # ★★★ 이게 없으면 파일 저장을 못해서 빨간불 뜸!
 
 jobs:
   run-naver:
@@ -25,7 +25,8 @@ jobs:
 
       - name: Run Naver Bot
         env:
-          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          # ★★★ 여기를 NAVER_TOKEN으로 바꿨습니다 ★★★
+          NAVER_TOKEN: ${{ secrets.NAVER_TOKEN }}
           TG_ID: ${{ secrets.TG_ID }}
         run: python naver_bot.py
 
@@ -33,5 +34,5 @@ jobs:
         run: |
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
-          git add watchlist.json saved_naver_history.json last_update_id.txt
+          git add watchlist.json saved_naver_history.json last_update_id.txt || true
           git diff --quiet && git diff --staged --quiet || (git commit -m "Update Naver Data" && git push)
