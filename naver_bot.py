@@ -1,9 +1,11 @@
 import requests
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
 import json
 import time
 import os
 import urllib3
-import urllib.parse # 한글 인코딩용
+import urllib.parse
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -11,14 +13,21 @@ TELEGRAM_TOKEN = os.environ.get('NAVER_TOKEN')
 CHAT_ID = os.environ.get('TG_ID')
 WATCHLIST_FILE = 'watchlist.json'
 
-# ★★★ 더 강력한 위장술 (헤더 보강) ★★★
+# ★★★ 강력한 위장술 (PC 크롬 브라우저인 척하기) ★★★
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-    "Accept": "*/*",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
     "Referer": "https://m.land.naver.com/"
 }
+
+# ★★★ 접속기(Session) 생성: 실패하면 3번까지 다시 시도함 ★★★
+session = requests.Session()
+retry = Retry(connect=3, backoff_factor=1) # 1초 쉬고 재시도
+adapter = HTTPAdapter(max_retries=retry)
+session.mount('http://', adapter)
+session.mount('https://', adapter)
+session.headers.update(HEADERS)
 
 GU_CODES = {
     "강남": "1168000000", "서초": "1165000000", "송파": "1171000000", "용산": "1117000000",
@@ -44,14 +53,22 @@ def send_msg(text, reply_markup=None):
     if not TELEGRAM_TOKEN or not CHAT_ID: return
     params = {"chat_id": CHAT_ID, "text": text}
     if reply_markup: params["reply_markup"] = json.dumps(reply_markup)
-    try: requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", params=params, timeout=5)
+    try: session.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", params=params, timeout=5)
     except: pass
 
 def delete_msg(msg_id):
-    try: requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage", params={"chat_id": CHAT_ID, "message_id": msg_id}, timeout=5)
+    try: session.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage", params={"chat_id": CHAT_ID, "message_id": msg_id}, timeout=5)
     except: pass
 
-# 메뉴 버튼
+# ★ 네이버 접속 함수 (강화됨)
+def naver_request(url, params=None):
+    try:
+        res = session.get(url, params=params, verify=False, timeout=10)
+        return res
+    except Exception as e:
+        print(f"접속 실패: {e}")
+        return None
+
 def get_main_menu():
     return {"inline_keyboard": [
         [{"text": "🌍 지역(구) 설정", "callback_data": "MENU_GU"}, 
@@ -70,56 +87,42 @@ def get_gu_menu(watchlist):
     buttons.append([{"text": "🔙 메인으로", "callback_data": "MAIN"}])
     return {"inline_keyboard": buttons}
 
-# ★ 진단 기능: 아파트 검색 결과 상세 보고
 def search_complex(keyword):
-    # 한글 깨짐 방지 인코딩
     encoded_keyword = urllib.parse.quote(keyword)
     url = f"https://m.land.naver.com/api/search/client/search?keyword={encoded_keyword}"
     
-    try:
-        res = requests.get(url, headers=HEADERS, verify=False, timeout=10) # 10초 대기
-        
-        if res.status_code != 200:
-            return None, f"❌ 네이버 접속 거부됨 (코드: {res.status_code})"
+    res = naver_request(url)
+    if not res: return None, "❌ 네이버가 응답하지 않습니다 (Timeout)."
+    if res.status_code != 200: return None, f"❌ 접속 차단됨 (코드: {res.status_code})"
             
-        data = res.json()
-        complexes = data.get("complexes", [])
-        
-        if not complexes:
-            return None, "❌ 검색 결과가 0건입니다. (철자를 확인하세요)"
-            
-        return complexes, "OK"
-        
-    except Exception as e:
-        return None, f"❌ 에러 발생: {str(e)}"
+    data = res.json()
+    complexes = data.get("complexes", [])
+    if not complexes: return None, "❌ 검색 결과가 없습니다."
+    return complexes, "OK"
 
-# ★ 연결 테스트
 def test_connection(target_type, code, name):
-    send_msg(f"🕵️‍♂️ '{name}' 매물 가져오는 중...")
+    send_msg(f"🕵️‍♂️ '{name}' 매물 확인 중...")
     url = "https://m.land.naver.com/article/getArticleList" if target_type == 'GU' else "https://m.land.naver.com/complex/getComplexArticleList"
     params = {"tradTpCd": "A1", "order": "date_desc"}
     if target_type == 'GU': params.update({"cortarNo": code, "rletTpCd": "APT"})
     else: params.update({"hscpNo": code, "showR0": "N"})
 
-    try:
-        res = requests.get(url, params=params, headers=HEADERS, verify=False, timeout=10)
+    res = naver_request(url, params)
+    if res and res.status_code == 200:
         items = res.json().get('result', {}).get('list', [])
-        
         if items:
             item = items[0]
-            msg = f"✅ **[연결 성공]** {name}\n최신 매물: {item.get('hanPrc')} / {item.get('spc1')}㎡"
+            msg = f"✅ **[연결 성공]** {name}\n최신: {item.get('hanPrc')} / {item.get('spc1')}㎡"
             send_msg(msg)
-            # 저장
             saved = load_json("saved_naver_history.json")
             if item.get('atclNo') not in saved:
                 saved.append(item.get('atclNo'))
                 save_json("saved_naver_history.json", saved)
         else:
-            send_msg(f"✅ 연결은 됐으나 현재 '{name}' 매물이 없습니다.")
-    except Exception as e:
-        send_msg(f"❌ 데이터 가져오기 실패: {str(e)}")
+            send_msg(f"✅ 연결 성공 (현재 매물 없음)")
+    else:
+        send_msg("❌ 데이터 가져오기 실패 (네이버 차단)")
 
-# 텔레그램 처리 로직
 def process_telegram():
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
     offset = 0
@@ -129,29 +132,27 @@ def process_telegram():
             except: pass
 
     try:
-        res = requests.get(url, params={"offset": offset + 1, "timeout": 5}).json()
+        res = session.get(url, params={"offset": offset + 1, "timeout": 5}).json()
         if not res.get("ok"): return False
         
         watchlist = load_json(WATCHLIST_FILE)
         is_changed = False
         updates = res.get("result", [])
-        
         if not updates: return False
 
         for item in updates:
             offset = item["update_id"]
-            
             if "callback_query" in item:
                 cb = item["callback_query"]
                 data = cb["data"]
                 msg_id = cb["message"]["message_id"]
-                requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery", params={"callback_query_id": cb["id"]})
+                session.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery", params={"callback_query_id": cb["id"]})
                 
                 if data == "MAIN":
                     send_msg("⚙️ 설정 메뉴", get_main_menu())
                     delete_msg(msg_id)
                 elif data == "MENU_GU":
-                    send_msg("🌍 감시할 구를 선택하세요", get_gu_menu(watchlist))
+                    send_msg("🌍 감시할 구 선택", get_gu_menu(watchlist))
                     delete_msg(msg_id)
                 elif data.startswith("TOGGLE_GU"):
                     _, name, code = data.split(":")
@@ -166,7 +167,7 @@ def process_telegram():
                     send_msg("🌍 감시할 구 선택", get_gu_menu(watchlist))
                     delete_msg(msg_id)
                 elif data == "MENU_APT":
-                    send_msg("⌨️ 채팅창에 아파트 이름을 입력하세요 (예: 헬리오시티)", {"inline_keyboard": [[{"text":"🔙 취소","callback_data":"MAIN"}]]})
+                    send_msg("⌨️ 아파트 이름을 입력하세요 (예: 잠실엘스)", {"inline_keyboard": [[{"text":"🔙 취소","callback_data":"MAIN"}]]})
                     delete_msg(msg_id)
                 elif data.startswith("ADD_APT"):
                     _, code, name = data.split(":")
@@ -184,29 +185,24 @@ def process_telegram():
             elif "message" in item:
                 text = item["message"].get("text", "")
                 if text == "/start":
-                    send_msg("🤖 네이버 비서 대기 중.", get_main_menu())
+                    send_msg("🤖 네이버 비서입니다.", get_main_menu())
                 elif not text.startswith("/"):
                     send_msg(f"🔎 '{text}' 검색 시도...")
-                    # ★ 여기서 진단 함수 호출
                     complexes, error_msg = search_complex(text)
-                    
                     if complexes:
                         btns = []
                         for c in complexes[:5]:
                             btns.append([{"text": f"🏢 {c['complexName']}", "callback_data": f"ADD_APT:{c['complexNo']}:{c['complexName']}"}])
                         btns.append([{"text":"🔙 취소","callback_data":"MAIN"}])
-                        send_msg(f"👇 '{text}' 검색 결과:", {"inline_keyboard": btns})
+                        send_msg(f"👇 결과 선택:", {"inline_keyboard": btns})
                     else:
-                        send_msg(error_msg) # 왜 실패했는지 에러 메시지 전송
+                        send_msg(error_msg)
 
         if is_changed: save_json(WATCHLIST_FILE, watchlist)
         with open("last_update_id.txt", "w") as f: f.write(str(offset))
         return True
-    except Exception as e:
-        print(f"Error: {e}") 
-        return False
+    except: return False
 
-# 매물 스캔
 def check_naver_listings():
     watchlist = load_json(WATCHLIST_FILE)
     if not watchlist: return
@@ -219,8 +215,10 @@ def check_naver_listings():
         if target['type'] == 'GU': params.update({"cortarNo": target['code'], "rletTpCd": "APT", "prcMax": 300000})
         else: params.update({"hscpNo": target['code'], "showR0": "N"})
         
+        res = naver_request(url, params)
+        if not res: continue
+
         try:
-            res = requests.get(url, params=params, headers=HEADERS, verify=False, timeout=10)
             items = res.json().get('result', {}).get('list', [])
             for item in items:
                 aid = item.get('atclNo')
