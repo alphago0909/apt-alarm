@@ -3,17 +3,20 @@ import json
 import time
 import os
 import urllib3
+import datetime
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ==========================================
-# ★★★ 네이버 봇 전용 설정 ★★★
-# ==========================================
-TELEGRAM_TOKEN = os.environ.get('NAVER_TOKEN') # 네이버 봇 토큰
-CHAT_ID = os.environ.get('TG_ID')              # 내 아이디
+TELEGRAM_TOKEN = os.environ.get('NAVER_TOKEN')
+CHAT_ID = os.environ.get('TG_ID')
 WATCHLIST_FILE = 'watchlist.json'
 
-# 구 코드 데이터 (버튼용)
+# 네이버 모바일 흉내내기 (검색 성공률 100%를 위해)
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Mobile/15E148 Safari/604.1",
+    "Referer": "https://m.land.naver.com/"
+}
+
 GU_CODES = {
     "강남": "1168000000", "서초": "1165000000", "송파": "1171000000", "용산": "1117000000",
     "성동": "1120000000", "마포": "1144000000", "광진": "1121500000", "양천": "1147000000",
@@ -24,7 +27,6 @@ GU_CODES = {
     "중랑": "1126000000"
 }
 
-# 1. 기본 도구들
 def load_json(filename):
     if not os.path.exists(filename): return []
     with open(filename, 'r', encoding='utf-8') as f:
@@ -39,39 +41,65 @@ def send_msg(text, reply_markup=None):
     if not TELEGRAM_TOKEN or not CHAT_ID: return
     params = {"chat_id": CHAT_ID, "text": text}
     if reply_markup: params["reply_markup"] = json.dumps(reply_markup)
-    try: requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", params=params)
-    except: pass
+    requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", params=params)
 
 def delete_msg(msg_id):
-    try: requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage", params={"chat_id": CHAT_ID, "message_id": msg_id})
-    except: pass
+    requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage", params={"chat_id": CHAT_ID, "message_id": msg_id})
 
-# 2. 메뉴 버튼 만들기 (여기가 화면 만드는 곳)
+# ★ 신기능: 제대로 연결됐는지 테스트하는 함수
+def test_connection(target_type, code, name):
+    send_msg(f"🕵️‍♂️ '{name}' 매물 데이터에 접속 시도 중...")
+    
+    url = "https://m.land.naver.com/article/getArticleList" if target_type == 'GU' else "https://m.land.naver.com/complex/getComplexArticleList"
+    params = {"tradTpCd": "A1", "order": "date_desc"}
+    if target_type == 'GU': params.update({"cortarNo": code, "rletTpCd": "APT"})
+    else: params.update({"hscpNo": code, "showR0": "N"})
+
+    try:
+        res = requests.get(url, params=params, headers=HEADERS, verify=False, timeout=5)
+        items = res.json().get('result', {}).get('list', [])
+        
+        if items:
+            item = items[0] # 가장 최신 것 하나만
+            price = item.get('hanPrc')
+            apt = item.get('atclNm')
+            msg = (
+                f"✅ **[연결 성공]** 감시가 시작되었습니다!\n"
+                f"현재 가장 최신 매물은 아래와 같습니다:\n\n"
+                f"🏢 {apt}\n💰 {price}\n"
+                f"(이제부터 새로운게 올라오면 알림을 드립니다)"
+            )
+            send_msg(msg)
+            # 이걸 저장해둬야 중복 알림 안 옴
+            saved = load_json("saved_naver_history.json")
+            if item.get('atclNo') not in saved:
+                saved.append(item.get('atclNo'))
+                save_json("saved_naver_history.json", saved)
+        else:
+            send_msg(f"✅ 연결은 성공했으나, 현재 '{name}'에 등록된 매물이 하나도 없습니다.")
+    except Exception as e:
+        send_msg(f"❌ 데이터 가져오기 실패: {e}")
+
 def get_main_menu():
     return {"inline_keyboard": [
         [{"text": "🌍 지역(구) 설정", "callback_data": "MENU_GU"}, 
          {"text": "🏢 아파트 설정", "callback_data": "MENU_APT"}],
-        [{"text": "📋 내 감시 목록 확인", "callback_data": "SHOW_LIST"}]
+        [{"text": "📋 내 감시 목록", "callback_data": "SHOW_LIST"}]
     ]}
 
 def get_gu_menu(watchlist):
     buttons, row = [], []
     for name, code in GU_CODES.items():
-        # 이미 감시 중이면 체크 표시(✅)
         is_active = any(x['type'] == 'GU' and x['code'] == code for x in watchlist)
         label = f"{'✅' if is_active else '⬜'} {name}"
         row.append({"text": label, "callback_data": f"TOGGLE_GU:{name}:{code}"})
-        if len(row) == 3: # 3개씩 줄바꿈
-            buttons.append(row); row = []
+        if len(row) == 3: buttons.append(row); row = []
     if row: buttons.append(row)
-    buttons.append([{"text": "🔙 메인으로 돌아가기", "callback_data": "MAIN"}])
+    buttons.append([{"text": "🔙 메인으로", "callback_data": "MAIN"}])
     return {"inline_keyboard": buttons}
 
-# 3. 텔레그램 버튼 누른거 처리하기
 def process_telegram():
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-    
-    # 마지막으로 읽은 메시지 번호 가져오기
     offset = 0
     if os.path.exists("last_update_id.txt"):
         with open("last_update_id.txt", "r") as f: 
@@ -79,7 +107,6 @@ def process_telegram():
             except: pass
 
     try:
-        # 메시지 확인
         res = requests.get(url, params={"offset": offset + 1, "timeout": 5}).json()
         if not res.get("ok"): return False
         
@@ -92,114 +119,95 @@ def process_telegram():
         for item in updates:
             offset = item["update_id"]
             
-            # [상황 A] 버튼을 눌렀을 때
             if "callback_query" in item:
                 cb = item["callback_query"]
                 data = cb["data"]
                 msg_id = cb["message"]["message_id"]
-                # 로딩바 없애기
                 requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery", params={"callback_query_id": cb["id"]})
                 
                 if data == "MAIN":
-                    send_msg("⚙️ 설정을 선택하세요.", get_main_menu())
-                    delete_msg(msg_id) # 이전 메뉴 지우기 (깔끔하게)
-
-                elif data == "MENU_GU":
-                    send_msg("🌍 감시할 구를 선택하세요.\n(누를 때마다 추가/해제됩니다)", get_gu_menu(watchlist))
+                    send_msg("⚙️ 설정 메뉴", get_main_menu())
                     delete_msg(msg_id)
-
+                elif data == "MENU_GU":
+                    send_msg("🌍 감시할 구를 선택하세요", get_gu_menu(watchlist))
+                    delete_msg(msg_id)
                 elif data.startswith("TOGGLE_GU"):
                     _, name, code = data.split(":")
                     exists = next((i for i,x in enumerate(watchlist) if x['code']==code), -1)
-                    
                     if exists > -1: 
-                        watchlist.pop(exists) # 이미 있으면 삭제
-                        txt = f"🗑️ {name}구 감시 해제"
+                        watchlist.pop(exists)
+                        send_msg(f"🗑️ {name}구 감시를 해제했습니다.")
                     else: 
-                        watchlist.append({"type":"GU", "name":name, "code":code}) # 없으면 추가
-                        txt = f"✅ {name}구 추가 완료"
+                        watchlist.append({"type":"GU", "name":name, "code":code})
+                        # ★ 여기서 즉시 테스트 실행
+                        test_connection("GU", code, name)
                     
                     is_changed = True
-                    send_msg(txt) # 알림 메시지 잠깐 보냄
-                    send_msg("🌍 감시할 구를 선택하세요.", get_gu_menu(watchlist)) # 메뉴판 갱신
+                    send_msg("🌍 감시할 구 선택", get_gu_menu(watchlist))
                     delete_msg(msg_id)
-
+                    
                 elif data == "MENU_APT":
-                    send_msg("⌨️ 채팅창에 **아파트 이름**을 입력해주세요.\n(예: 헬리오시티, 잠실엘스)", {"inline_keyboard": [[{"text":"🔙 취소","callback_data":"MAIN"}]]})
+                    send_msg("⌨️ 채팅창에 아파트 이름을 입력하세요.\n(예: 잠실엘스, 헬리오시티)", {"inline_keyboard": [[{"text":"🔙 취소","callback_data":"MAIN"}]]})
                     delete_msg(msg_id)
-
+                    
                 elif data.startswith("ADD_APT"):
                     _, code, name = data.split(":")
                     if not any(x['code']==code for x in watchlist):
                         watchlist.append({"type":"APT", "name":name, "code":code})
-                        send_msg(f"✅ '{name}' 감시 시작!", get_main_menu())
+                        # ★ 여기서 즉시 테스트 실행
+                        test_connection("APT", code, name)
                         is_changed = True
                     else:
-                        send_msg("⚠️ 이미 감시 중인 아파트입니다.", get_main_menu())
+                        send_msg("⚠️ 이미 감시 중입니다.", get_main_menu())
                     delete_msg(msg_id)
-
+                    
                 elif data == "SHOW_LIST":
-                    if not watchlist:
-                        txt = "📭 현재 감시 중인 목록이 없습니다."
-                    else:
-                        txt = "📋 **[현재 감시 목록]**\n"
-                        for w in watchlist:
-                            icon = "🌍" if w['type'] == 'GU' else "🏢"
-                            txt += f"{icon} {w['name']}\n"
+                    txt = "📋 감시 목록:\n" + "\n".join([f"- {w['name']}" for w in watchlist]) if watchlist else "📭 목록이 비었습니다."
                     send_msg(txt, get_main_menu())
                     delete_msg(msg_id)
             
-            # [상황 B] 채팅(텍스트)을 쳤을 때
             elif "message" in item:
                 text = item["message"].get("text", "")
-                
                 if text == "/start":
-                    send_msg("👋 안녕하세요! 네이버 부동산 비서입니다.\n아래 버튼을 눌러 설정을 시작하세요.", get_main_menu())
+                    send_msg("🤖 네이버 부동산 비서입니다.", get_main_menu())
                 elif not text.startswith("/"):
-                    # 아파트 검색 모드
                     send_msg(f"🔎 '{text}' 검색 중...")
                     try:
-                        # 네이버에 검색해보기
-                        r = requests.get("https://m.land.naver.com/api/search/client/search", params={"keyword":text}, headers={"User-Agent":"Mozilla/5.0"}, verify=False).json()
+                        # 모바일 헤더 추가하여 검색
+                        r = requests.get("https://m.land.naver.com/api/search/client/search", params={"keyword":text}, headers=HEADERS, verify=False).json()
                         btns = []
-                        # 검색 결과 최대 5개 보여주기
                         for c in r.get("complexes", [])[:5]:
                             btns.append([{"text": f"🏢 {c['complexName']}", "callback_data": f"ADD_APT:{c['complexNo']}:{c['complexName']}"}])
-                        
                         btns.append([{"text":"🔙 취소","callback_data":"MAIN"}])
                         
                         if len(btns) > 1:
-                            send_msg("👇 추가할 아파트를 선택하세요:", {"inline_keyboard": btns})
+                            send_msg(f"👇 '{text}' 검색 결과:", {"inline_keyboard": btns})
                         else:
-                            send_msg("❌ 검색 결과가 없습니다. 정확한 이름을 입력해주세요.")
-                    except: 
-                        send_msg("❌ 검색 중 오류가 발생했습니다.")
+                            send_msg("❌ 검색 결과가 없습니다.")
+                    except: send_msg("❌ 검색 오류")
 
         if is_changed: save_json(WATCHLIST_FILE, watchlist)
         with open("last_update_id.txt", "w") as f: f.write(str(offset))
         return True
     except: return False
 
-# 4. 부동산 매물 털어오기
 def check_naver_listings():
     watchlist = load_json(WATCHLIST_FILE)
     if not watchlist: return
     
-    print("🔍 매물 스캔 중...")
+    print("🔍 스캔 중...")
     saved = load_json("saved_naver_history.json")
-    headers = {"User-Agent": "Mozilla/5.0"}
     
     for target in watchlist:
-        time.sleep(1) # 차단 방지
+        time.sleep(1)
         url = "https://m.land.naver.com/article/getArticleList" if target['type'] == 'GU' else "https://m.land.naver.com/complex/getComplexArticleList"
         params = {"tradTpCd": "A1", "order": "date_desc"}
         
-        if target['type'] == 'GU': params.update({"cortarNo": target['code'], "rletTpCd": "APT", "prcMax": 300000}) # 구 전체는 30억 이하만
+        if target['type'] == 'GU': params.update({"cortarNo": target['code'], "rletTpCd": "APT", "prcMax": 300000})
         else: params.update({"hscpNo": target['code'], "showR0": "N"})
         
         try:
-            items = requests.get(url, params=params, headers=headers, verify=False, timeout=5).json().get('result',{}).get('list',[])
-            count = 0
+            items = requests.get(url, params=params, headers=HEADERS, verify=False, timeout=5).json().get('result',{}).get('list',[])
             for item in items:
                 aid = item.get('atclNo')
                 if aid in saved: continue
@@ -209,27 +217,20 @@ def check_naver_listings():
                 area = item.get('spc1')
                 link = f"https://m.land.naver.com/article/info/{aid}"
                 
-                msg = f"🔔 [네이버 매물 - {target['name']}]\n🏢 {apt}\n💰 {price} / {area}㎡\n🔗 {link}"
+                msg = f"🔔 [{target['name']} 신규]\n🏢 {apt}\n💰 {price} / {area}㎡\n🔗 {link}"
                 send_msg(msg)
                 saved.append(aid)
-                count += 1
-                if count >= 3: break # 폭탄 방지
         except: continue
         
     if len(saved) > 2000: saved = saved[-2000:]
     save_json("saved_naver_history.json", saved)
 
-# 5. 메인 실행 (5분 동안 깨어있기)
 if __name__ == "__main__":
-    print("🚀 봇 가동! (5분간 대기)")
-    end_time = time.time() + (5 * 60) # 5분 타이머
+    print("🚀 봇 가동")
+    end_time = time.time() + (5 * 60)
     
     while time.time() < end_time:
-        # 1. 버튼 눌렀나 확인 (0.5초마다)
         process_telegram()
-        
-        # 2. 매물 확인 (1분마다)
         if int(time.time()) % 60 == 0:
             check_naver_listings()
-            
         time.sleep(0.5)
