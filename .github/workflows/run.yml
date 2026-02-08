@@ -1,0 +1,36 @@
+name: Seoul Apt Alarm
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # 30분마다 실행
+  workflow_dispatch:      # 수동 실행 버튼
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install requests
+
+      - name: Run alarm script
+        env:
+          SEOUL_KEY: ${{ secrets.SEOUL_KEY }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_ID: ${{ secrets.TG_ID }}
+        run: python main.py
+
+      - name: Commit and push if changes
+        run: |
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git add saved_deals.txt
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update deals" && git push)
