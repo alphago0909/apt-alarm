@@ -1,128 +1,99 @@
 import requests
 import xml.etree.ElementTree as ET
-import urllib3
-import time
+import datetime
 import os
+import json
 
-# 보안 경고 끄기
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# 깃허브 금고에서 키를 꺼내옵니다
+# ==========================================
+# 환경변수 (Github Secrets에서 가져옴)
+# ==========================================
+SERVICE_KEY = os.environ.get('DATA_KEY')
 TELEGRAM_TOKEN = os.environ.get('TG_TOKEN')
 CHAT_ID = os.environ.get('TG_ID')
-SERVICE_KEY = os.environ.get('SEOUL_KEY')
 
-# 서울시 25개 구 코드
-SEOUL_CODES = {
-    "강남구": "11680", "서초구": "11650", "송파구": "11710", "강동구": "11740",
-    "마포구": "11440", "용산구": "11170", "성동구": "11200", "광진구": "11215",
-    "종로구": "11110", "중구": "11140", "동대문구": "11230", "서대문구": "11410",
-    "영등포구": "11560", "동작구": "11590", "관악구": "11620", "강서구": "11500",
-    "양천구": "11470", "구로구": "11530", "금천구": "11545", "은평구": "11380",
-    "성북구": "11290", "강북구": "11305", "도봉구": "11320", "노원구": "11350",
-    "중랑구": "11260"
-}
+# 감시할 지역 코드 (예: 광진구 11215)
+LAWD_CD = '11215' 
+DEAL_YMD = datetime.datetime.now().strftime('%Y%m')
 
-def send_telegram_msg(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    params = {"chat_id": CHAT_ID, "text": message}
+# ★ 여기가 핵심: 보낸 내역 저장하는 파일 이름
+HISTORY_FILE = 'sent_list.json'
+
+def load_history():
+    if not os.path.exists(HISTORY_FILE): return []
+    with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+        try: return json.load(f)
+        except: return []
+
+def save_history(data):
+    with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def send_telegram(msg):
+    url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
     try:
-        requests.get(url, params=params)
-    except Exception:
-        pass
+        requests.get(url, params={'chat_id': CHAT_ID, 'text': msg})
+    except: pass
 
-def safe_get_text(item, tag, default=""):
-    found = item.find(tag)
-    if found is not None and found.text is not None:
-        return found.text.strip()
-    return default
-
-def load_saved_deals():
-    if not os.path.exists("saved_deals.txt"):
-        return []
-    with open("saved_deals.txt", "r", encoding="utf-8") as f:
-        return f.read().splitlines()
-
-def save_deal(unique_id):
-    with open("saved_deals.txt", "a", encoding="utf-8") as f:
-        f.write(unique_id + "\n")
-
-def check_new_deals():
-    # 현재 날짜 기준 (YYYYMM)
-    deal_ymd = time.strftime("%Y%m") 
-    
-    urls = {
-        "매매": "https://apis.data.go.kr/1613000/RTMSDataSvcAptTrade/getRTMSDataSvcAptTrade",
-        "전월세": "https://apis.data.go.kr/1613000/RTMSDataSvcAptRent/getRTMSDataSvcAptRent",
-        "분양권": "https://apis.data.go.kr/1613000/RTMSDataSvcSilvTrade/getRTMSDataSvcSilvTrade"
+def get_apt_trade():
+    url = 'http://openapi.molit.go.kr/OpenAPI_ToolInstallPackage/service/rest/RTMSOBJSvc/getRTMSDataSvcAptTradeDev'
+    params = {
+        'serviceKey': requests.utils.unquote(SERVICE_KEY),
+        'LAWD_CD': LAWD_CD,
+        'DEAL_YMD': DEAL_YMD,
+        'numOfRows': '100'
     }
     
-    saved_deals = load_saved_deals()
-    
-    for gu_name, lawd_cd in SEOUL_CODES.items():
-        time.sleep(1) # 차단 방지
+    try:
+        res = requests.get(url, params=params)
+        root = ET.fromstring(res.content)
+        items = root.findall('.//item')
         
-        for type_name, url in urls.items():
-            params = {"serviceKey": SERVICE_KEY, "LAWD_CD": lawd_cd, "DEAL_YMD": deal_ymd}
-            
+        # 1. 기존 장부(이미 보낸 것들) 펼치기
+        sent_list = load_history()
+        new_sent_list = sent_list.copy()
+        
+        count = 0
+        
+        for item in items:
             try:
-                response = requests.get(url, params=params, verify=False, timeout=10)
-                if response.status_code != 200: continue
-                    
-                root = ET.fromstring(response.content)
-                items = root.findall("body/items/item")
+                apt_name = item.find('아파트').text
+                price = item.find('거래금액').text.strip()
+                day = item.find('일').text
+                floor = item.find('층').text
+                area = item.find('전용면적').text
                 
-                for item in items:
-                    apt = safe_get_text(item, "aptNm", "아파트")
-                    floor = safe_get_text(item, "floor", "0")
-                    
-                    # ★★★ 날짜 풀버전 추출 (년/월/일) ★★★
-                    year = safe_get_text(item, "dealYear", "2025")
-                    month = safe_get_text(item, "dealMonth", "1")
-                    day = safe_get_text(item, "dealDay", "1")
-                    
-                    full_date = f"{year}.{month}.{day}" # 예: 2025.1.25
+                # ★ 거래마다 '고유 번호표'를 붙입니다. (아파트이름+가격+층+날짜)
+                # 이게 같으면 100% 중복 거래입니다.
+                unique_id = f"{apt_name}_{price}_{floor}_{day}"
+                
+                # 2. 장부에 있는 번호표면? -> 패스! (중복 방지)
+                if unique_id in sent_list:
+                    continue 
+                
+                # 3. 장부에 없으면? -> 알림 보내기!
+                msg = f"🏠 **[실거래 알림]**\n"
+                msg += f"단지: {apt_name}\n"
+                msg += f"가격: {price}만원\n"
+                msg += f"층수: {floor}층\n"
+                msg += f"면적: {area}㎡"
+                
+                send_telegram(msg)
+                print(f"전송 완료: {unique_id}")
+                
+                # 4. 방금 보낸 건 장부에 기록
+                new_sent_list.append(unique_id)
+                count += 1
+                
+            except: continue
+        
+        # 5. 장부 덮어쓰기 (최근 500개만 기억)
+        if len(new_sent_list) > 500:
+            new_sent_list = new_sent_list[-500:]
+        save_history(new_sent_list)
+        print(f"총 {count}개의 신규 거래 발견")
+        
+    except Exception as e:
+        print(f"에러: {e}")
 
-                    # 면적 처리
-                    area = safe_get_text(item, "excluUseAr", "") 
-                    if not area: area = safe_get_text(item, "contractArea", "0")
-                    try:
-                        area_float = float(area)
-                        pyung = round(area_float / 3.3058, 1)
-                        area_str = f"{area_float}㎡ ({pyung}평)"
-                    except:
-                        area_str = f"{area}㎡"
-
-                    # 가격 정보
-                    if type_name == "전월세":
-                        deposit = safe_get_text(item, "deposit", "0")
-                        monthly = safe_get_text(item, "monthlyRent", "0")
-                        price_str = f"전세 {deposit}" if monthly == "0" else f"월세 {deposit}/{monthly}"
-                    else:
-                        price = safe_get_text(item, "dealAmount", "0")
-                        price_str = f"{type_name} {price}"
-
-                    # 고유 ID에 풀버전 날짜 포함
-                    unique_id = f"{gu_name}|{type_name}|{apt}|{area}|{floor}층|{price_str}|{full_date}"
-                    
-                    if unique_id not in saved_deals:
-                        icon = "🏠" if type_name == "매매" else ("🔑" if type_name == "전월세" else "🎫")
-                        
-                        # ★★★ 알람 메시지: 날짜 수정됨 ★★★
-                        msg = (
-                            f"🔔 [서울 {gu_name} - 신규 {type_name}]\n"
-                            f"{icon} {apt} ({floor}층)\n"
-                            f"📏 {area_str}\n"
-                            f"💰 {price_str}만원\n"
-                            f"📅 계약: {full_date}"  # 여기에 2025.1.25 형식으로 표시
-                        )
-                        
-                        send_telegram_msg(msg)
-                        save_deal(unique_id)
-                        saved_deals.append(unique_id)
-                        
-            except Exception:
-                continue
-
-if __name__ == "__main__":
-    check_new_deals()
+if __name__ == '__main__':
+    get_apt_trade()
